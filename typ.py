@@ -13,6 +13,12 @@ class TypedValue:
         else:
             self.type, self.blob_or_ptr = typ, blob_or_ptr
 
+    @classmethod
+    def new_lvalue(cls, typ=None, *, init=None, reduce=True):
+        if typ is None:
+            typ = init.type
+        return TypedValue(typ, base.alloc(typ.width), reduce).assign(init)
+
     def ensure_reduced(self):
         if self.reduced:
             return self
@@ -44,6 +50,14 @@ class TypedValue:
 
     def cast(self, typ, implicit=False):
         return typ.cast(self, implicit)
+
+    def assign(self, other=None):
+        if other is None:
+            return self
+        if self.type != other.type:
+            raise base.InterpreterError("assignment types do not match")
+        self.raw = other.raw
+        return self
 
     def __getitem__(self, index):
         if isinstance(index, int):
@@ -135,6 +149,8 @@ class CType:
         return "?"
 
     def cast(self, value, implicit=False):
+        if value.type == self:
+            return value
         raise base.InterpreterError(f"can't {'implicitly '*implicit}cast {value.type!r} to {self!r}")
 
     def value(self, data):
@@ -432,28 +448,36 @@ class VoidType(CType):
 FLOAT = FloatingPointType(True)
 DOUBLE = FloatingPointType(False)
 
-def arithmetic_cast(left, right):
-    if not isinstance(left.type, (FloatingPointType, IntegralType, PointerType)):
-        raise base.InterpreterError(f"arithmetic operation on {left.type!r}")
-    if not isinstance(right.type, (FloatingPointType, IntegralType, PointerType)):
-        raise base.InterpreterError(f"arithmetic operation on {right.type!r}")
+def arithmetic_types(left, right):
+    if not isinstance(left, (FloatingPointType, IntegralType, PointerType)):
+        raise base.InterpreterError(f"arithmetic operation on {left!r}")
+    if not isinstance(right, (FloatingPointType, IntegralType, PointerType)):
+        raise base.InterpreterError(f"arithmetic operation on {right!r}")
 
-    if isinstance(left.type, FloatingPointType) and isinstance(right.type, FloatingPointType):
-        typ1 = typ2 = typ3 = FloatingPointType(left.type.short and right.type.short)
-    elif isinstance(left.type, IntegralType) and isinstance(right.type, IntegralType):
-        typ1 = typ2 = typ3 = IntegralType(left.type.signed or right.type.signed, max(left.type.length, right.type.length))
-    elif isinstance(left.type, FloatingPointType) and isinstance(right.type, IntegralType):
-        typ1 = typ2 = typ3 = left.type
-    elif isinstance(left.type, IntegralType) and isinstance(right.type, FloatingPointType):
-        typ1 = typ2 = typ3 = right.type
-    elif (isinstance(left.type, PointerType) and isinstance(right.type, IntegralType)) or (isinstance(left.type, IntegralType) and isinstance(right.type, PointerType)):
-        typ1 = left.type
-        typ2 = right.type
-        typ3 = left.type if isinstance(left.type, PointerType) else right.type
+    if isinstance(left, FloatingPointType) and isinstance(right, FloatingPointType):
+        typ1 = typ2 = typ3 = FloatingPointType(left.short and right.short)
+    elif isinstance(left, IntegralType) and isinstance(right, IntegralType):
+        typ1 = typ2 = typ3 = IntegralType(left.signed or right.signed, max(left.length, right.length))
+    elif isinstance(left, FloatingPointType) and isinstance(right, IntegralType):
+        typ1 = typ2 = typ3 = left
+    elif isinstance(left, IntegralType) and isinstance(right, FloatingPointType):
+        typ1 = typ2 = typ3 = right
+    elif (isinstance(left, PointerType) and isinstance(right, IntegralType)) or (isinstance(left, IntegralType) and isinstance(right, PointerType)):
+        typ1 = left
+        typ2 = right
+        typ3 = left if isinstance(left, PointerType) else right
+    elif isinstance(left, PointerType) and isinstance(right, PointerType):
+        typ1 = left
+        typ2 = right
+        typ3 = PTRDIFF_T
     else:
-        raise base.InterpreterError(f"arithmetic operation between {left.type!r} and {right.type!r}")
+        raise base.InterpreterError(f"arithmetic operation between {left!r} and {right!r}")
 
-    return left.cast(typ1, implicit=True), right.cast(typ2, implicit=True), typ3
+    return typ1, typ2, typ3
+
+def arithmetic_cast(left, right):
+    lhst, rhst, rest = arithmetic_types(left.type, right.type)
+    return left.cast(lhst, implicit=True), right.cast(rhst, implicit=True), rest
 
 def comparison_cast(left, right):
     if isinstance(left.type, PointerType) and isinstance(right.type, PointerType):

@@ -72,7 +72,7 @@ int __write_memstream(void *buf, int sz, int n, FILE *file)
         void *new = realloc(*userdata->pbuf, 2 * *userdata->pbufsz);
         if (!new) {
             file->flags = __FILE_ERROR;
-            return nout;
+            return 0;
         }
         *userdata->pbuf = new;
         *userdata->pbufsz *= 2;

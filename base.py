@@ -1,4 +1,5 @@
 import random
+import weakref
 from dataclasses import dataclass
 from contextlib import contextmanager
 
@@ -7,6 +8,7 @@ functions = {}
 frame_stack = [{"": "<static>"}]
 globalvars = {}
 string_constants = {}
+attrs = weakref.WeakKeyDictionary()
 
 def intern_string_constant(arg):
     try:

@@ -27,10 +27,7 @@ def call(func, args):
 
     with base.in_frame({"": func.decl.name, "?": func.coord}) as frame:
         for (argtype, argname), arg in zip(arginfos, args[:len(arginfos)] if variadic else args, strict=True):
-            rvalue = argtype.cast(arg, implicit=True)
-            obj = TypedValue(argtype, base.alloc(argtype.width))
-            obj.raw = rvalue.raw
-            frame[argname] = obj
+            frame[argname] = TypedValue.new_lvalue(init=argtype.cast(arg, implicit=True))
 
         if variadic:
             converted_args = []
@@ -46,7 +43,7 @@ def call(func, args):
             i = 0
             for arg in converted_args:
                 base.set_at(rest + i, arg.raw)
-                i += len(arg.raw)
+                i += arg.type.width
             frame["..."] = TypedValue(ArrayType(CHAR, size), rest, reduce=False)
 
         rtype = functype.rtype
@@ -67,35 +64,7 @@ def call(func, args):
 def decl(node, target):
     if node.name in target and target[node.name] is not None:
         raise base.InterpreterError(f"re-declaration of {node.name}")
-    typ = node.type
-    if isinstance(node.type, ArrayType):
-        init = bytearray(typ.width)
-        if isinstance(node.init, pycparser.c_ast.InitList):
-            if len(node.init.exprs) == 1:
-                initval = ast_eval(node.init.exprs[0]).cast(typ.target_type, implicit=True).raw
-                for i in range(0, typ.width, typ.target_type.width):
-                    init[i:i+typ.target_type.width] = initval
-            else:
-                for i, subnode in zip(range(0, typ.width, typ.target_type.width), node.init.exprs):
-                    init[i:i+typ.target_type.width] = ast_eval(subnode).cast(typ.target_type, implicit=True).raw
-        elif isinstance(node.init, pycparser.c_ast.Constant) and node.init.type == "string":
-            init[:typ.width] = (ast.literal_eval(node.init.value).encode("utf8") + b"\0")[:typ.width]
-        elif node.init is not None:
-            raise base.InterpreterError("can only initialize array with initializer list or string")
-
-    elif isinstance(typ, StructType) and isinstance(node.init, pycparser.c_ast.InitList):
-        init = bytearray(typ.width)
-        offs = 0
-        for (_, ftype), subnode in zip(typ.fields, node.init.exprs):
-            init[offs:offs+ftype.width] = ast_eval(subnode).cast(ftype, implicit=True).raw
-            offs += ftype.width
-
-    else:
-        init = (TypedValue(typ, b"\0" * typ.width) if node.init is None else ast_eval(node.init).cast(typ, implicit=True)).raw
-
-    obj = TypedValue(typ, base.alloc(typ.width), reduce=False)  # don't reduce variables!!!!!
-    obj.raw = init
-    target[node.name] = obj
+    target[node.name] = TypedValue.new_lvalue(node.type, reduce=False, init=ast_eval(node.init).cast(node.type, implicit=True) if node.init else None)
 
 def ast_convert_types(ast, typedefs=None):
     typedefs = {} if typedefs is None else typedefs
@@ -155,13 +124,16 @@ def ast_convert_types(ast, typedefs=None):
         if isinstance(v, pycparser.c_ast.Typedef):
             typedefs[v.name] = get_type(v, "type")
             if isinstance(ast, list):
-                del ast[k]
+                ast[k] = None
             else:
                 delattr(ast, k)
         elif isinstance(v, (pycparser.c_ast.Struct, pycparser.c_ast.IdentifierType, pycparser.c_ast.ArrayDecl, pycparser.c_ast.PtrDecl, pycparser.c_ast.TypeDecl, pycparser.c_ast.Typename, pycparser.c_ast.FuncDecl)):
             get_type(ast, k)
         else:
             ast_convert_types(v, typedefs)
+    if isinstance(ast, list):
+        while None in ast:
+            ast.remove(None)
 
 def dump_stack():
     frames_repr = "{"
@@ -180,6 +152,151 @@ def dump_stack():
 
 def coerce_to_bool(val):
     return (isinstance(val.type, PointerType) and val.value != 0) or val.cast(INT, implicit=True).value != 0
+
+def ast_type_tree(nodes, nearest_block=None):
+    node = nodes[-1]
+    # if node.coord:
+        # print(node.coord.file, node.coord.line, node.coord.column)
+
+    def rec(node, new_nearest_block=None):
+        return ast_type_tree([*nodes, node], new_nearest_block if new_nearest_block else nearest_block)
+
+    def typ():
+        # A statement
+        if isinstance(node, pycparser.c_ast.FileAST):
+            base.attrs[node]["parent_block"] = nearest_block
+            base.attrs[node]["local_vars"] = {}
+            for i in node.ext:
+                rec(i, node)
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.FuncDef):
+            base.attrs[node]["parent_block"] = nearest_block
+            base.attrs[node]["local_vars"] = {i.name: i for i in node.decl.type.argtypes}
+            base.attrs[nearest_block]["local_vars"][node.decl.name] = node.decl.type
+            rec(node.body, node)
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.Compound):
+            base.attrs[node]["parent_block"] = nearest_block
+            base.attrs[node]["local_vars"] = {}
+            for subnode in node.block_items:
+                rec(subnode, node)
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.If):
+            base.attrs[node]["parent_block"] = nearest_block
+            base.attrs[node]["local_vars"] = {}
+            rec(node.cond, node)
+            rec(node.iftrue, node)
+            if node.iffalse:
+                rec(node.iffalse, node)
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.For):
+            base.attrs[node]["parent_block"] = nearest_block
+            base.attrs[node]["local_vars"] = {}
+            if node.init:
+                rec(node.init, node)
+            if node.cond:
+                rec(node.cond, node)
+            if node.stmt:
+                rec(node.stmt, node)
+            if node.next:
+                rec(node.next, node)
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.While):
+            base.attrs[node]["parent_block"] = nearest_block
+            base.attrs[node]["local_vars"] = {}
+            rec(node.cond, node)
+            rec(node.stmt, node)
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.EmptyStatement):
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.DeclList):
+            for subnode in node.decls:
+                rec(subnode)
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.Decl):
+            if node.init:
+                rec(node.init)
+            base.attrs[nearest_block]["local_vars"][node.name] = node.type
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.Return):
+            rec(node.expr)
+            return VoidType()
+
+        if isinstance(node, pycparser.c_ast.Continue):
+            return VoidType()
+
+        # An expression
+        if isinstance(node, pycparser.c_ast.Constant):
+            if node.type == "string" and isinstance(nodes[-2], pycparser.c_ast.Decl) and isinstance(nodes[-2].type, ArrayType):
+                return nodes[-2].type
+            return {"string": PointerType(CHAR), "int": INT, "long long int": LONG_LONG, "unsigned long long int": UNSIGNED_LONG_LONG, "char": CHAR}[node.type]
+
+        if isinstance(node, pycparser.c_ast.BinaryOp):
+            # TODO: Automatically introduce cast
+            lhst, rhst = rec(node.left), rec(node.right)
+            if node.op in {"&&", "||", "==", "!=", "<", ">", "<=", ">="}:
+                return INT
+            return arithmetic_types(lhst, rhst)[2]
+
+        if isinstance(node, pycparser.c_ast.UnaryOp):
+            if node.op == "sizeof":
+                return INT
+            exprt = rec(node.expr)
+            if node.op == "++" or node.op == "--" or node.op == "p++" or node.op == "p--":
+                return arithmetic_types(exprt, INT)[2]
+            return {"&": lambda: PointerType(exprt), "*": lambda: exprt.target_type, "-": lambda: exprt, "!": lambda: INT}[node.op]()
+
+        if isinstance(node, pycparser.c_ast.Assignment):
+            rec(node.lvalue)
+            return rec(node.rvalue)
+
+        if isinstance(node, pycparser.c_ast.StructRef):
+            if node.type == "->":
+                return rec(node.name).target_type.get_field_type(node.field.name)
+
+        if isinstance(node, pycparser.c_ast.InitList):
+            if isinstance(nodes[-2], pycparser.c_ast.Decl):
+                return nodes[-2].type
+            elif isinstance(nodes[-2], pycparser.c_ast.Cast):
+                return nodes[-2].to_type
+            raise InterpreterError("incorrect position for initializer list")            
+
+        if isinstance(node, pycparser.c_ast.ID):
+            # print("===========")
+            block = nearest_block
+            while block is not None:
+                # print("search in", base.attrs[block]["local_vars"])
+                if node.name in base.attrs[block]["local_vars"]:
+                    return base.attrs[block]["local_vars"][node.name].reduce(0)[0]
+                block = base.attrs[block]["parent_block"]
+            raise base.InterpreterError(f"no such variable {node.name}")
+
+        exprtype_func_map = {
+            pycparser.c_ast.Cast:      lambda: [rec(node.expr), node.to_type][1],
+            pycparser.c_ast.FuncCall:  lambda: [rec(node.name), *(rec(subnode) for subnode in (node.args or []))][0],
+            pycparser.c_ast.ArrayRef:  lambda: [rec(node.name), rec(node.subscript)][0].target_type,
+            pycparser.c_ast.ExprList:  lambda: [rec(subnode) for subnode in node.exprs][-1],
+            pycparser.c_ast.TernaryOp: lambda: [rec(node.iftrue), rec(node.cond), rec(node.iffalse)][0]
+        }
+
+        try:
+            func = exprtype_func_map[type(node)]
+        except KeyError:
+            raise NotImplementedError(node) from None
+        return func()
+
+    base.attrs[node] = {}
+    res = base.attrs[node]["type"] = typ()
+    return res
 
 nodes_evald = 0
 DEBUG = False
@@ -253,11 +370,35 @@ def ast_eval(node):
 
     # The expressions
     if isinstance(node, pycparser.c_ast.Constant):
+        if node.type == "string" and isinstance((typ := base.attrs[node]["type"]), ArrayType):
+            return TypedValue(typ, ast.literal_eval(node.value).encode("utf8").ljust(typ.width, b"\0")[:typ.width], reduce=False)
         type_func_map = {
             "string": lambda x: PointerType(CHAR).conv(base.intern_string_constant(ast.literal_eval(x))), "int": lambda x: INT.conv(x),
             "long long int": lambda x: LONG_LONG.conv(x[:-2]), "char": lambda x: CHAR.conv(ord(ast.literal_eval(x)))
         }
         return type_func_map[node.type](node.value)
+
+    if isinstance(node, pycparser.c_ast.InitList):
+        target_type = base.attrs[node]["type"]
+        if isinstance(target_type, ArrayType):
+            init = bytearray(target_type.width)
+            if len(node.exprs) == 1:
+                initvals = [ast_eval(node.exprs[0]).cast(target_type.target_type, implicit=True)] * len(target_type.n)
+            else:
+                initvals = [ast_eval(subnode).cast(target_type.target_type, implicit=True) for subnode in node.exprs]
+            for i, initval in zip(range(0, target_type.width, target_type.target_type.width), initvals):
+                init[i:i+target_type.target_type.width] = initval.raw
+            return TypedValue(target_type, init, reduce=False)
+
+        elif isinstance(target_type, StructType):
+            init = bytearray(target_type.width)
+            offs = 0
+            for (_, ftype), subnode in zip(target_type.fields, node.exprs):
+                init[offs:offs+ftype.width] = ast_eval(subnode).cast(ftype, implicit=True).raw
+                offs += ftype.width
+            return TypedValue(target_type, init)
+
+        raise InterpreterError(f"invalid initializer list of type {target_type!r}")
 
     if isinstance(node, pycparser.c_ast.BinaryOp):
         op_func_map = {
@@ -274,14 +415,12 @@ def ast_eval(node):
 
     if isinstance(node, pycparser.c_ast.UnaryOp):
         if node.op == "++" or node.op == "--":
-            lvalue = ast_eval(node.expr)
-            lvalue.raw = (lvalue + CHAR.conv(1 if node.op == "++" else -1)).raw
-            return lvalue
+            return (lvalue := ast_eval(node.expr)).assign(lvalue + CHAR.conv(1 if node.op == "++" else -1))
 
         if node.op == "p++" or node.op == "p--":
             lvalue = ast_eval(node.expr)
             rvalue = TypedValue(lvalue.type, lvalue.raw)
-            lvalue.raw = (lvalue + CHAR.conv(1 if node.op == "p++" else -1)).raw
+            lvalue.assign(lvalue + CHAR.conv(1 if node.op == "p++" else -1))
             return rvalue
 
         if node.op == "sizeof":
@@ -294,7 +433,7 @@ def ast_eval(node):
     if isinstance(node, pycparser.c_ast.Assignment):
         op_func_map = {"=": lambda _, v: v, "*=": operator.mul, "/=": operator.truediv, "%=": operator.mod, "+=": operator.add, "-=": operator.sub}
         lvalue = ast_eval(node.lvalue)
-        lvalue.raw = (rvalue := op_func_map[node.op](lvalue, ast_eval(node.rvalue))).cast(lvalue.type, implicit=True).raw
+        lvalue.assign((rvalue := op_func_map[node.op](lvalue, ast_eval(node.rvalue))).cast(lvalue.type, implicit=True))
         return rvalue
 
     if isinstance(node, pycparser.c_ast.StructRef):

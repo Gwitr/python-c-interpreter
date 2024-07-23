@@ -68,17 +68,17 @@ if __name__ == "__main__":
     function_idx = 1
     for fn in ["libc.c", "main.c"]:
         new_struct_ctx()
-        ext = pycparser.parse_file(fn, use_cpp=True, cpp_args="-Iinclude").ext
+        tree = pycparser.parse_file(fn, use_cpp=True, cpp_args="-Iinclude")
+        ext = tree.ext
         ceval.ast_convert_types(ext)
+        ceval.ast_type_tree([tree])
         for nodei, node in enumerate(ext):
             if isinstance(node, pycparser.c_ast.FuncDef):
                 if node.decl.name in base.globalvars:
                     base.functions[base.globalvars[node.decl.name].value] = node
                 else:
                     base.functions[function_idx] = node
-                    value = INTPTR_T.conv(function_idx).cast(PointerType(node.decl.type))
-                    base.globalvars[node.decl.name] = TypedValue(value.type, base.alloc(value.type.width))
-                    base.globalvars[node.decl.name].raw = value.raw
+                    base.globalvars[node.decl.name] = TypedValue.new_lvalue(init=INTPTR_T.conv(function_idx).cast(PointerType(node.decl.type)))
                     function_idx += 1
 
             elif isinstance(node, pycparser.c_ast.Decl):
@@ -87,9 +87,7 @@ if __name__ == "__main__":
                         if base.globalvars[node.name].type.target_type != node.type:
                             raise base.InterpreterError(f"re-declaration of function {node.name} with different type")
                     else:
-                        value = INTPTR_T.conv(function_idx).cast(PointerType(node.type))
-                        base.globalvars[node.name] = TypedValue(value.type, base.alloc(value.type.width))
-                        base.globalvars[node.name].raw = value.raw
+                        base.globalvars[node.name] = TypedValue.new_lvalue(init=INTPTR_T.conv(function_idx).cast(PointerType(node.type)))
                         function_idx += 1
                 else:
                     if "extern" not in node.storage:
