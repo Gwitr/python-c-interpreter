@@ -55,82 +55,15 @@ class TypedValue:
         if other is None:
             return self
         if self.type != other.type:
-            raise base.InterpreterError("assignment types do not match")
+            raise base.InterpreterError(f"assignment types do not match ({self.type!r}, {other.type!r})")
         self.raw = other.raw
         return self
-
-    def __getitem__(self, index):
-        if isinstance(index, int):
-            return self.type.deref((self + LONG_LONG.conv(index)).raw)
-        return self.type.deref((self + index).raw)
-
-    def __setitem__(self, index, value):
-        if isinstance(index, int):
-            index = LONG_LONG.conv(index)
-        target = self.type.deref((self + index).raw)
-        target.raw = target.type.cast(value, implicit=True).raw
 
     @property
     def at(self):
         if self.is_lvalue:
             return INTPTR_T.conv(self.blob_or_ptr).cast(PointerType(self.type))
         raise base.InterpreterError("take address of rvalue")
-
-    def arth(self, other, castfunc, forbidden, op):
-        left, right = self, other
-        if isinstance(left, forbidden) or isinstance(right, forbidden):
-            raise base.InterpreterError(f"arithmetic operation between {left.type!r} and {right.type!r}")
-        left, right, outtype = arithmetic_cast(left, right)
-        return outtype.conv(op(left, right))
-
-    def __and__(self, other):
-        return self.arth(other, arithmetic_cast, (PointerType, FloatingPointType), lambda x, y: x.value & y.value)
-
-    def __add__(self, other):
-        left, right = self, other
-        if isinstance(right.type, PointerType):
-            right, left = left, right
-        if isinstance(left.type, PointerType):
-            return left.arth(right, arithmetic_cast, (), lambda x, y: x.value + y.value * x.type.target_type.width)
-        return left.arth(right, arithmetic_cast, (), lambda x, y: x.value + y.value)
-
-    def __sub__(self, other):
-        if isinstance(other.type, PointerType):
-            if isinstance(self.type, PointerType):
-                return PTRDIFF_T.conv(self.value - other.value)
-            raise base.InterpreterError(f"arithmetic operation between {self.type!r} and {other.type!r}")
-        if isinstance(self.type, PointerType):
-            return self.arth(other, arithmetic_cast, (), lambda x, y: x.value - y.value * x.type.target_type.width)
-        return self.arth(other, arithmetic_cast, (), lambda x, y: x.value - y.value)
-
-    def __mul__(self, other):
-        return self.arth(other, arithmetic_cast, (PointerType,), lambda x, y: x.value * y.value)
-
-    def __truediv__(self, other):
-        return self.arth(other, arithmetic_cast, (PointerType,), lambda x, y: x.value / y.value)  # TODO: have .conv do coercion
-
-    def __mod__(self, other):
-        return self.arth(other, arithmetic_cast, (PointerType, FloatingPointType), lambda x, y: x.value % y.value)
-
-    def __eq__(self, other):
-        return self.arth(other, comparison_cast, (), lambda x, y: x.value == y.value)
-
-    def __lt__(self, other):
-        return self.arth(other, comparison_cast, (), lambda x, y: x.value < y.value)
-    
-    def __le__(self, other):
-        return self.arth(other, comparison_cast, (), lambda x, y: x.value <= y.value)
-
-    def __gt__(self, other):
-        return self.arth(other, comparison_cast, (), lambda x, y: x.value > y.value)
-
-    def __ge__(self, other):
-        return self.arth(other, comparison_cast, (), lambda x, y: x.value >= y.value)
-
-    def __neg__(self):
-        if isinstance(self.type, (FloatingPointType, IntegralType)):
-            return self.type.conv(-self.value)
-        raise base.InterpreterError(f"arithmetic operation on {self.type!r}")
 
     def __call__(self, *args):
         return self.type.call(self.raw, *args)
@@ -158,9 +91,6 @@ class CType:
 
     def call(self, data, *args):
         raise base.InterpreterError(f"can't call {self!r}")
-
-    def deref(self):
-        raise base.InterpreterError(f"can't deref {self!r}")
 
     def reduce(self, raw):
         return self, raw
@@ -266,7 +196,6 @@ class PointerType(CType):
         if isinstance(self.target_type, FunctionType):
             import ceval
             return ceval.call(base.functions[self.value(data)], args)
-
         super().call(data, *args)
 
     def value(self, raw):
@@ -279,12 +208,6 @@ class PointerType(CType):
     def width(self):
         return 8
 
-    def deref(self, data):
-        if self.target_type == VoidType():
-            raise base.InterpreterError(f"dereference void pointer")
-        if isinstance(self.target_type, FunctionType):
-            return self
-        return TypedValue(self.target_type, self.value(data))
 
 class ArrayType(CType):
 
@@ -361,6 +284,10 @@ class StructType(CType):
         self.tag = tag
         self.fields = fields
 
+    @property
+    def nfields(self):
+        return len(self.fields)
+
     def with_name(self, name):
         pt = StructType(self.tag, self.fields)
         pt.name = name
@@ -370,6 +297,11 @@ class StructType(CType):
         if not isinstance(other, StructType):
             return NotImplemented
         return (self.tag,) == (other.tag,)
+
+    def field_value(self, i, raw):
+        offs = sum(f[1].width for f in self.fields[:i])
+        typ = self.fields[i][1]
+        return TypedValue(typ, raw[offs:offs+typ.width])
 
     def get_field_type(self, name):
         for fname, ftype in self.fields:
@@ -432,6 +364,9 @@ class FloatingPointType(CType):
             return self(value.value)
         super().cast(value, implicit)
 
+FLOAT = FloatingPointType(True)
+DOUBLE = FloatingPointType(False)
+
 class VoidType(CType):
 
     def with_name(self, name):
@@ -445,44 +380,4 @@ class VoidType(CType):
     def typename(self):
         return "void $"
 
-FLOAT = FloatingPointType(True)
-DOUBLE = FloatingPointType(False)
-
-def arithmetic_types(left, right):
-    if not isinstance(left, (FloatingPointType, IntegralType, PointerType)):
-        raise base.InterpreterError(f"arithmetic operation on {left!r}")
-    if not isinstance(right, (FloatingPointType, IntegralType, PointerType)):
-        raise base.InterpreterError(f"arithmetic operation on {right!r}")
-
-    if isinstance(left, FloatingPointType) and isinstance(right, FloatingPointType):
-        typ1 = typ2 = typ3 = FloatingPointType(left.short and right.short)
-    elif isinstance(left, IntegralType) and isinstance(right, IntegralType):
-        typ1 = typ2 = typ3 = IntegralType(left.signed or right.signed, max(left.length, right.length))
-    elif isinstance(left, FloatingPointType) and isinstance(right, IntegralType):
-        typ1 = typ2 = typ3 = left
-    elif isinstance(left, IntegralType) and isinstance(right, FloatingPointType):
-        typ1 = typ2 = typ3 = right
-    elif (isinstance(left, PointerType) and isinstance(right, IntegralType)) or (isinstance(left, IntegralType) and isinstance(right, PointerType)):
-        typ1 = left
-        typ2 = right
-        typ3 = left if isinstance(left, PointerType) else right
-    elif isinstance(left, PointerType) and isinstance(right, PointerType):
-        typ1 = left
-        typ2 = right
-        typ3 = PTRDIFF_T
-    else:
-        raise base.InterpreterError(f"arithmetic operation between {left!r} and {right!r}")
-
-    return typ1, typ2, typ3
-
-def arithmetic_cast(left, right):
-    lhst, rhst, rest = arithmetic_types(left.type, right.type)
-    return left.cast(lhst, implicit=True), right.cast(rhst, implicit=True), rest
-
-def comparison_cast(left, right):
-    if isinstance(left.type, PointerType) and isinstance(right.type, PointerType):
-        return left, right, INT
-    try:
-        return *arithmetic_cast(left, right)[:2], INT
-    except base.InterpreterError as e:
-        raise base.InterpreterError(f"comparison operation between {left.type!r} and {right.type!r}") from None
+VOID = VoidType()

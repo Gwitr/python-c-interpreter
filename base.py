@@ -25,7 +25,7 @@ def in_frame(init={}):
     frame_stack.append({**init})
     try:
         yield frame_stack[-1]
-    finally:    
+    finally:
         for obj in frame_stack.pop().values():
             if hasattr(obj, "at"):
                 free(obj.at.value)

@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 import pycparser
 
@@ -28,7 +29,7 @@ if __name__ == "__main__":
                 pass  # Code doesn't seem to use this function at all
 
     @builtin("__malloc_size", UNSIGNED_LONG_LONG, (PointerType(VoidType()), ))
-    def builtin_malloc(ptr):
+    def builtin_malloc_size(ptr):
         return INTPTR_T.conv(len(base.objects[ptr.value >> 32]))
 
     @builtin("malloc", PointerType(VoidType()), (INT, ))
@@ -94,7 +95,7 @@ if __name__ == "__main__":
                         ceval.decl(node, base.globalvars)
 
             else:
-                print(f"unknown global node type {type(node).__qualname__}")
+                raise base.InterpreterError(f"unknown global node type {type(node).__qualname__}")
 
     register_builtins()
 
@@ -103,7 +104,11 @@ if __name__ == "__main__":
         addresses.append(base.intern_string_constant(arg))
     base.objects[(argv_addr := base.alloc(8 * len(sys.argv) + 8)) >> 32] = struct.pack("<" + "Q" * len(sys.argv) + "Q", *addresses, 0)
 
+    print("program start")
+    s = time.process_time()
     res = base.globalvars["main"](INT.conv(len(sys.argv)), INTPTR_T.conv(argv_addr).cast(PointerType(PointerType(CHAR))))
+    print(round(time.process_time() - s, 3))
+    print("program end")
 
     print("leaked:", set(i for i in base.objects.keys()) - set(i.blob_or_ptr >> 32 for i in base.globalvars.values()) - set(value >> 32 for value in base.string_constants.values()) - {argv_addr >> 32})
     print("nodes eval'd:", ceval.nodes_evald)

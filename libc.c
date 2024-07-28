@@ -191,7 +191,7 @@ int feof(FILE *f)
 }
 
 // printf
-int __print_long_long(FILE *f, long long n, int sign_mode)
+int __print_lld(FILE *f, long long n, int sign_mode)
 {
     if (n == 0) {
         fputs("0", f);
@@ -214,7 +214,29 @@ int __print_long_long(FILE *f, long long n, int sign_mode)
     return fwrite(pbuf + 1, 1, buf + 20 - pbuf, f);
 }
 
-int __long_long_length(long long n, int sign_mode)
+int __print_llu(FILE *f, unsigned long long n, int sign_mode)
+{
+    if (n == 0u) {
+        fputs("0", f);
+        return 1;
+    }
+    char buf[31], *pbuf = buf + 30;
+    for (; n; n /= 10u)
+        *(pbuf--) = '0' + n % 10u;
+    if (sign_mode)
+        *(pbuf--) = sign_mode > 0 ? '+' : ' ';
+    return fwrite(pbuf + 1, 1, buf + 30 - pbuf, f);
+}
+
+int __lld_length(long long n, int sign_mode)
+{
+    int length = n <= 0 || sign_mode;
+    for (; n; n /= 10)
+        length++;
+    return length;
+}
+
+int __llu_length(unsigned long long n, int sign_mode)
 {
     int length = n <= 0 || sign_mode;
     for (; n; n /= 10)
@@ -308,10 +330,10 @@ int vfprintf(FILE *f, const char *fmt, va_list args)
                     else if (length == 2) val = va_arg(args, long long);
                 }
                 if (width && !ljust)
-                    diff += __rjust(f, width, __long_long_length(val, sign_mode), zeropad);
+                    diff += __rjust(f, width, *fmt == 'u' ? __llu_length(val, sign_mode) : __lld_length(val, sign_mode), zeropad);
                 if (diff < 0)
                     return nout;
-                diff += __print_long_long(f, val, sign_mode);
+                diff += *fmt == 'u' ? __print_llu(f, val, sign_mode) : __print_lld(f, val, sign_mode);
 
             } else if (*fmt == 'c') {
                 if (length != 0) { fputs("vfprintf: %c with nonzero length\n", stderr); abort(); }

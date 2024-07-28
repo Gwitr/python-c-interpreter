@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-int factorial(int n)
+unsigned long long factorial(unsigned long long n)
 {
     if (n == 0)
         return 1;
@@ -14,7 +14,7 @@ int main(int argc, char **argv)
         printf("%-2d | %s\n", i, argv[i]);
     printf("========================\n");
     printf("factorial output:\n");
-    for (int i = 0; i < 40; ++i)
-        printf("%3d! = %d\n", i, factorial(i));
+    for (int i = 0; i <= 20; ++i)
+        printf("%3d! = %llu\n", i, factorial(i));
     return 0;
 }
